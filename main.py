@@ -64,53 +64,123 @@ def build_news_section():
             section += f"<b>{title}</b><br>{summary}<br><a href='{url}'>{url}</a><br><br>"
     return section if section else "No relevant news articles today."
 
-# === GA4 via BigQuery ===
-def get_ga4_data():
+# === GA4 via BigQuery with Comparison ===
+def get_ga4_data(period='recent'):
     client = bigquery.Client.from_service_account_json(os.getenv("GOOGLE_APPLICATION_CREDENTIALS"))
-    query = """
+
+    if period == 'recent':
+        start_offset = 3
+        end_offset = 0
+    else:
+        start_offset = 6
+        end_offset = 3
+
+    query = f"""
+    WITH sessions AS (
+      SELECT
+        user_pseudo_id,
+        geo.country,
+        traffic_source.source AS source,
+        traffic_source.medium AS medium,
+        event_name,
+        event_params
+      FROM
+        `your_project_id.analytics_XXXXXXX.events_*`
+      WHERE
+        _TABLE_SUFFIX BETWEEN FORMAT_DATE('%Y%m%d', DATE_SUB(CURRENT_DATE(), INTERVAL {start_offset} DAY))
+        AND FORMAT_DATE('%Y%m%d', DATE_SUB(CURRENT_DATE(), INTERVAL {end_offset} DAY))
+    ),
+
+    pageviews AS (
+      SELECT
+        event_params.value.string_value AS page_title,
+        COUNT(*) AS views
+      FROM sessions
+      WHERE event_name = 'page_view'
+      GROUP BY page_title
+    ),
+
+    sessions_by_country AS (
+      SELECT
+        country,
+        COUNT(DISTINCT user_pseudo_id) AS sessions
+      FROM sessions
+      WHERE event_name = 'session_start'
+      GROUP BY country
+    ),
+
+    source_summary AS (
+      SELECT
+        source,
+        medium,
+        COUNT(*) AS sessions
+      FROM sessions
+      WHERE event_name = 'session_start'
+      GROUP BY source, medium
+    )
+
     SELECT
-      traffic_source.source as source,
-      traffic_source.medium as medium,
-      COUNT(*) as sessions
-    FROM
-      `your_project_id.analytics_XXXXXXX.events_*`
-    WHERE
-      event_name = 'session_start'
-      AND _TABLE_SUFFIX BETWEEN FORMAT_DATE('%Y%m%d', DATE_SUB(CURRENT_DATE(), INTERVAL 3 DAY))
-      AND FORMAT_DATE('%Y%m%d', CURRENT_DATE())
-    GROUP BY
-      source, medium
-    ORDER BY
-      sessions DESC
-    LIMIT 10
+      'pageviews' AS metric,
+      page_title AS label,
+      views AS value
+    FROM pageviews
+
+    UNION ALL
+
+    SELECT
+      'countries' AS metric,
+      country AS label,
+      sessions AS value
+    FROM sessions_by_country
+
+    UNION ALL
+
+    SELECT
+      'sources' AS metric,
+      CONCAT(source, ' / ', medium) AS label,
+      sessions AS value
+    FROM source_summary
+
+    ORDER BY metric, value DESC
     """
+
     return client.query(query).to_dataframe()
 
-# === GPT Summary for GA4 ===
-def summarise_ga4(df):
-    prompt = f"""Summarise the recent traffic trends for The Mixed Museum based on this breakdown of sessions by source/medium.
+# === GA4 Comparison Summary ===
+def summarise_ga4_with_comparison():
+    df_now = get_ga4_data(period='recent')
+    df_prev = get_ga4_data(period='previous')
 
-{df.to_string(index=False)}
+    summary_parts = []
 
-Write 2–3 sentences identifying standout traffic patterns or opportunities.
+    for metric in ['pageviews', 'countries', 'sources']:
+        now = df_now[df_now['metric'] == metric].set_index('label')
+        prev = df_prev[df_prev['metric'] == metric].set_index('label')
+        combined = now.join(prev, lsuffix='_now', rsuffix='_prev', how='outer').fillna(0)
+        combined['change'] = ((combined['value_now'] - combined['value_prev']) / combined['value_prev'].replace(0, 1)) * 100
+        combined = combined.sort_values(by='value_now', ascending=False).head(5)
+
+        table = combined[['value_now', 'value_prev', 'change']].round(1).to_string()
+        summary_parts.append(f"\nTop {metric} (current vs. previous 3 days):\n{table}")
+
+    prompt = f"""The Mixed Museum's GA4 report shows these comparisons between the last 3 days and the 3 days prior:
+{chr(10).join(summary_parts)}
+
+Please summarise any spikes, trends, or surprising drops across content, countries, or sources. Keep it under 5 sentences.
 """
+
     response = openai.ChatCompletion.create(
         model="gpt-3.5-turbo",
         messages=[{"role": "user", "content": prompt}],
-        max_tokens=150
+        max_tokens=180
     )
-    return response.choices[0].message.content.strip()
+    return "\n\n".join(summary_parts), response.choices[0].message.content.strip()
 
 # === GA4 Section Output ===
 def build_ga4_section():
     try:
-        df = get_ga4_data()
-        summary = summarise_ga4(df)
-        section = "<b>Traffic Sources (last 3 days)</b><br><br>"
-        for _, row in df.iterrows():
-            section += f"- {row['source']} / {row['medium']}: {row['sessions']} sessions<br>"
-        section += f"<br><b>AI Summary:</b><br>{summary}"
-        return section
+        table, summary = summarise_ga4_with_comparison()
+        return f"<pre>{table}</pre><br><b>AI Summary:</b><br>{summary}"
     except Exception as e:
         return f"⚠️ Error retrieving GA4 data: {e}"
 
@@ -143,6 +213,13 @@ def send_daily_email(subject, news_html, ga4_html):
       }}
       a {{
         color: #0066cc;
+      }}
+      pre {{
+        font-size: 13px;
+        background-color: #f8f8f8;
+        padding: 10px;
+        border: 1px solid #eee;
+        overflow-x: auto;
       }}
     </style>
     </head>
