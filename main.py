@@ -1,7 +1,6 @@
 import os
 from dotenv import load_dotenv
 import openai
-import pandas as pd
 from newsapi import NewsApiClient
 from google.cloud import bigquery
 import smtplib
