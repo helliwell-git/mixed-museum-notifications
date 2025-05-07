@@ -18,20 +18,34 @@ newsapi = NewsApiClient(api_key=os.getenv("NEWS_API_KEY"))
 def get_news_articles():
     keywords = [
         "mixed heritage", "mixed race", "biracial", "dual heritage",
-        "multiethnic", "racial identity", "cultural identity", "interracial family"
+        "multiethnic", "racial identity", "cultural identity", "interracial family",
+        "representation", "ethnicity", "racial diversity", "hybridity",
+        "migrant heritage", "diaspora", "postcolonial", "black British history",
+        "Afro-European", "racial justice", "intersectionality",
+        "heritage month", "identity politics", "intercultural"
     ]
-    domains = ','.join([
-        'bbc.co.uk', 'theguardian.com', 'independent.co.uk',
-        'nytimes.com', 'cnn.com', 'npr.org',
-        'euronews.com', 'dw.com', 'lemonde.fr', 'spiegel.de'
-    ])
+    domains = [
+        # UK
+        "bbc.co.uk", "theguardian.com", "independent.co.uk", "thetimes.co.uk",
+        "telegraph.co.uk", "ft.com", "mirror.co.uk", "metro.co.uk", "express.co.uk",
+        "standard.co.uk", "channel4.com", "sky.com", "newstatesman.com", "prospectmagazine.co.uk",
+
+        # US
+        "nytimes.com", "washingtonpost.com", "npr.org", "cnn.com", "abcnews.go.com",
+        "nbcnews.com", "reuters.com", "apnews.com", "bloomberg.com", "usatoday.com",
+        "latimes.com", "pbs.org", "theatlantic.com", "vox.com", "slate.com",
+
+        # Europe
+        "euronews.com", "dw.com", "lemonde.fr", "spiegel.de", "elpais.com",
+        "politico.eu", "ilpost.it", "la Repubblica", "derstandard.at", "nos.nl"
+    ]
 
     articles = newsapi.get_everything(
         q=' OR '.join(keywords),
-        domains=domains,
+        domains=','.join(domains),
         language='en',
         sort_by='publishedAt',
-        page_size=10
+        page_size=20
     )
     return articles.get('articles', [])
 
