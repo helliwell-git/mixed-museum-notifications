@@ -7,6 +7,7 @@ from google.cloud import bigquery
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from datetime import datetime, timedelta
 
 load_dotenv()
 
@@ -16,6 +17,7 @@ newsapi = NewsApiClient(api_key=os.getenv("NEWS_API_KEY"))
 
 # === Fetch Relevant News Articles ===
 def get_news_articles():
+    # Keywords to identify culturally relevant stories
     keywords = [
         "mixed heritage", "mixed race", "biracial", "dual heritage",
         "multiethnic", "racial identity", "cultural identity", "interracial family",
@@ -24,6 +26,8 @@ def get_news_articles():
         "Afro-European", "racial justice", "intersectionality",
         "heritage month", "identity politics", "intercultural"
     ]
+
+    # News domains to restrict search to reputable outlets
     domains = [
         # UK
         "bbc.co.uk", "theguardian.com", "independent.co.uk", "thetimes.co.uk",
@@ -40,14 +44,30 @@ def get_news_articles():
         "politico.eu", "ilpost.it", "la Repubblica", "derstandard.at", "nos.nl"
     ]
 
+    # Only fetch stories from the last 24 hours
+    from_param = (datetime.utcnow() - timedelta(days=1)).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+    # Query NewsAPI
     articles = newsapi.get_everything(
-        q=' OR '.join(keywords),
-        domains=','.join(domains),
+        q=' OR '.join(keywords),              # Combine keywords using OR
+        domains=','.join(domains),            # Restrict to trusted sources
         language='en',
         sort_by='publishedAt',
-        page_size=20
+        page_size=40,
+        from_param=from_param                 # Only articles published in last 24 hours
     )
-    return articles.get('articles', [])
+
+    # Deduplicate by stripping URL parameters
+    seen_urls = set()
+    clean_articles = []
+
+    for article in articles.get('articles', []):
+        url = article['url'].split('?')[0]  # Strip tracking params like ?utm=...
+        if url not in seen_urls:
+            seen_urls.add(url)
+            clean_articles.append(article)
+
+    return clean_articles
 
 # === Summarise News Relevance ===
 def summarise_article(title, content):
