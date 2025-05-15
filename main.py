@@ -6,9 +6,12 @@ from google.cloud import bigquery
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from email.mime.image import MIMEImage
 from datetime import datetime, timedelta
 import imaplib
 import email
+import matplotlib.pyplot as plt
+import io
 
 load_dotenv()
 
@@ -19,7 +22,7 @@ newsapi = NewsApiClient(api_key=os.getenv("NEWS_API_KEY"))
 FREQUENCY_FILE = "frequency.txt"
 ALLOWED_SENDERS = ["chamion@themixedmuseum.org"]  # Add more allowed if needed
 
-# === Frequency Control ===
+# === Frequency Control (unchanged) ===
 def get_current_frequency():
     if not os.path.exists(FREQUENCY_FILE):
         return "DAILY"
@@ -36,13 +39,11 @@ def parse_command_from_reply(body):
         cleaned = line.strip().lower()
         if cleaned in ["daily", "weekly", "fortnightly"]:
             return cleaned.upper()
-        # If the first non-empty, non-command line isn't a command, stop
         if cleaned and not cleaned.startswith('>'):
             break
     return None
 
 def check_email_for_command():
-    # Only runs if IMAP credentials are set
     if not os.getenv("EMAIL_FROM") or not os.getenv("EMAIL_PASSWORD"):
         return
     mail = imaplib.IMAP4_SSL("imap.gmail.com")
@@ -55,7 +56,6 @@ def check_email_for_command():
         sender = email.utils.parseaddr(msg['From'])[1]
         if sender.lower() not in [a.lower() for a in ALLOWED_SENDERS]:
             continue
-        # Get plain text part of email
         body = ""
         if msg.is_multipart():
             for part in msg.walk():
@@ -67,7 +67,6 @@ def check_email_for_command():
         command = parse_command_from_reply(body)
         if command:
             update_frequency(command)
-            # Optionally, send confirmation email back
     mail.logout()
 
 def should_send_email(frequency):
@@ -77,11 +76,11 @@ def should_send_email(frequency):
     elif frequency == "WEEKLY":
         return today.weekday() == 0  # Monday
     elif frequency == "FORTNIGHTLY":
-        anchor = datetime(2024, 5, 6).date()  # Choose your anchor date
+        anchor = datetime(2024, 5, 6).date()
         return ((today - anchor).days // 7) % 2 == 0 and today.weekday() == 0
     return False
 
-# === Fetch Relevant News Articles ===
+# === Fetch Relevant News Articles (unchanged) ===
 def get_news_articles():
     keywords = [
         "mixed heritage", "mixed race", "biracial", "dual heritage",
@@ -92,17 +91,12 @@ def get_news_articles():
         "heritage month", "identity politics", "intercultural"
     ]
     domains = [
-        # UK
         "bbc.co.uk", "theguardian.com", "independent.co.uk", "thetimes.co.uk",
         "telegraph.co.uk", "ft.com", "mirror.co.uk", "metro.co.uk", "express.co.uk",
         "standard.co.uk", "channel4.com", "sky.com", "newstatesman.com", "prospectmagazine.co.uk",
-
-        # US
         "nytimes.com", "washingtonpost.com", "npr.org", "cnn.com", "abcnews.go.com",
         "nbcnews.com", "reuters.com", "apnews.com", "bloomberg.com", "usatoday.com",
         "latimes.com", "pbs.org", "theatlantic.com", "vox.com", "slate.com",
-
-        # Europe
         "euronews.com", "dw.com", "lemonde.fr", "spiegel.de", "elpais.com",
         "politico.eu", "ilpost.it", "la Repubblica", "derstandard.at", "nos.nl"
     ]
@@ -124,7 +118,7 @@ def get_news_articles():
             clean_articles.append(article)
     return clean_articles
 
-# === Summarise News Relevance ===
+# === Summarise News Relevance (unchanged) ===
 def summarise_article(title, content):
     prompt = f"""You are helping The Mixed Museum track public conversations about mixed heritage.
 Given the following article, is it relevant to themes of mixed heritage, racial identity, or representation?
@@ -139,7 +133,6 @@ Content: {content}
     )
     return response.choices[0].message.content.strip()
 
-# === News Section Output ===
 def build_news_section():
     section = ""
     for article in get_news_articles():
@@ -151,7 +144,7 @@ def build_news_section():
             section += f"<b>{title}</b><br>{summary}<br><a href='{url}'>{url}</a><br><br>"
     return section if section else "No relevant news articles today."
 
-# === GA4 via BigQuery with Comparison ===
+# === GA4 via BigQuery with Comparison (unchanged) ===
 def get_ga4_data(period='recent'):
     client = bigquery.Client.from_service_account_json(os.getenv("GOOGLE_APPLICATION_CREDENTIALS"))
     if period == 'recent':
@@ -221,7 +214,6 @@ def get_ga4_data(period='recent'):
     """
     return client.query(query).to_dataframe()
 
-# === GA4 Comparison Summary ===
 def summarise_ga4_with_comparison():
     df_now = get_ga4_data(period='recent')
     df_prev = get_ga4_data(period='previous')
@@ -243,27 +235,53 @@ Please summarise any spikes, trends, or surprising drops across content, countri
         messages=[{"role": "user", "content": prompt}],
         max_tokens=180
     )
-    return "\n\n".join(summary_parts), response.choices[0].message.content.strip()
+    return "\n\n".join(summary_parts), response.choices[0].message.content.strip(), df_now
 
-# === GA4 Section Output ===
-def build_ga4_section():
+# === Visualisation Helpers ===
+def plot_bar_chart(df, metric, title, ylabel):
+    import matplotlib
+    matplotlib.use('Agg')  # Ensure it works headless
+    fig, ax = plt.subplots(figsize=(6, 3))
+    data = df[df['metric'] == metric].sort_values('value', ascending=False).head(5)
+    ax.bar(data['label'], data['value'], color='#4677C7')
+    ax.set_title(title)
+    ax.set_ylabel(ylabel)
+    plt.xticks(rotation=30, ha='right')
+    plt.tight_layout()
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png')
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+def build_ga4_section_with_charts():
     try:
-        table, summary = summarise_ga4_with_comparison()
-        return f"<pre>{table}</pre><br><b>AI Summary:</b><br>{summary}"
+        table, summary, df_now = summarise_ga4_with_comparison()
+        # Two charts: Top Sources, Top Countries
+        chart_sources = plot_bar_chart(df_now, 'sources', 'Top Traffic Sources', 'Sessions')
+        chart_countries = plot_bar_chart(df_now, 'countries', 'Top Countries', 'Sessions')
+        html = f"<pre>{table}</pre><br><b>AI Summary:</b><br>{summary}"
+        return html, [("chart_sources.png", chart_sources), ("chart_countries.png", chart_countries)]
     except Exception as e:
-        return f"⚠️ Error retrieving GA4 data: {e}"
+        return f"⚠️ Error retrieving GA4 data: {e}", []
 
 # === Email Sending ===
-def send_daily_email(subject, news_html, ga4_html):
+def send_daily_email(subject, news_html, ga4_html, images=[]):
     sender = os.getenv("EMAIL_FROM")
     recipient = os.getenv("EMAIL_TO")
     password = os.getenv("EMAIL_PASSWORD")
     smtp_server = os.getenv("SMTP_SERVER")
     smtp_port = int(os.getenv("SMTP_PORT"))
-    msg = MIMEMultipart("alternative")
+    msg = MIMEMultipart("related")
     msg['From'] = sender
     msg['To'] = recipient
     msg['Subject'] = subject
+
+    # Embed images inline in the HTML
+    img_html = ""
+    for i, (name, img_buf) in enumerate(images):
+        img_html += f'<img src="cid:img{i}" style="max-width:90%; margin-bottom:15px;"><br>'
+
     html_body = f"""
     <html>
     <head>
@@ -297,18 +315,30 @@ def send_daily_email(subject, news_html, ga4_html):
       {news_html}
       <h2>📊 Website Trends from GA4</h2>
       {ga4_html}
+      {img_html}
       <br>
       <b>To change the frequency of these emails, simply reply to this email with the first line as one of: Daily, Weekly, Fortnightly.</b>
       <p>—<br><i>This email was generated automatically by mixed-heritage-alert-bot.</i></p>
     </body>
     </html>
     """
-    msg.attach(MIMEText(html_body, 'html'))
+    msg_alt = MIMEMultipart("alternative")
+    msg_alt.attach(MIMEText(html_body, 'html'))
+    msg.attach(msg_alt)
+
+    # Attach images
+    for i, (name, img_buf) in enumerate(images):
+        img = MIMEImage(img_buf.read(), name=name)
+        img.add_header('Content-ID', f'<img{i}>')
+        img.add_header('Content-Disposition', 'inline', filename=name)
+        msg.attach(img)
+        img_buf.seek(0)
+
     with smtplib.SMTP(smtp_server, smtp_port) as server:
         server.starttls()
         server.login(sender, password)
         server.send_message(msg)
-        print("✅ Email sent successfully.")
+        print("✅ Email sent successfully with visualisations.")
 
 # === Main Execution ===
 if __name__ == "__main__":
@@ -316,7 +346,7 @@ if __name__ == "__main__":
     freq = get_current_frequency()
     if should_send_email(freq):
         news = build_news_section()
-        ga4 = build_ga4_section()
-        send_daily_email("The Mixed Museum: Media & Analytics Brief", news, ga4)
+        ga4_html, images = build_ga4_section_with_charts()
+        send_daily_email("The Mixed Museum: Media & Analytics Brief", news, ga4_html, images)
     else:
         print(f"Not time to send report ({freq}).")
