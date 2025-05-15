@@ -7,6 +7,8 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta
+import imaplib
+import email
 
 load_dotenv()
 
@@ -14,9 +16,73 @@ load_dotenv()
 openai.api_key = os.getenv("OPENAI_API_KEY")
 newsapi = NewsApiClient(api_key=os.getenv("NEWS_API_KEY"))
 
+FREQUENCY_FILE = "frequency.txt"
+ALLOWED_SENDERS = ["chamion@themixedmuseum.org"]  # Add more allowed if needed
+
+# === Frequency Control ===
+def get_current_frequency():
+    if not os.path.exists(FREQUENCY_FILE):
+        return "DAILY"
+    with open(FREQUENCY_FILE, "r") as f:
+        return f.read().strip().upper()
+
+def update_frequency(new_freq):
+    with open(FREQUENCY_FILE, "w") as f:
+        f.write(new_freq.upper())
+    print(f"Frequency updated to {new_freq}")
+
+def parse_command_from_reply(body):
+    for line in body.splitlines():
+        cleaned = line.strip().lower()
+        if cleaned in ["daily", "weekly", "fortnightly"]:
+            return cleaned.upper()
+        # If the first non-empty, non-command line isn't a command, stop
+        if cleaned and not cleaned.startswith('>'):
+            break
+    return None
+
+def check_email_for_command():
+    # Only runs if IMAP credentials are set
+    if not os.getenv("EMAIL_FROM") or not os.getenv("EMAIL_PASSWORD"):
+        return
+    mail = imaplib.IMAP4_SSL("imap.gmail.com")
+    mail.login(os.getenv("EMAIL_FROM"), os.getenv("EMAIL_PASSWORD"))
+    mail.select("inbox")
+    status, messages = mail.search(None, '(UNSEEN)')
+    for num in messages[0].split():
+        typ, msg_data = mail.fetch(num, '(RFC822)')
+        msg = email.message_from_bytes(msg_data[0][1])
+        sender = email.utils.parseaddr(msg['From'])[1]
+        if sender.lower() not in [a.lower() for a in ALLOWED_SENDERS]:
+            continue
+        # Get plain text part of email
+        body = ""
+        if msg.is_multipart():
+            for part in msg.walk():
+                if part.get_content_type() == 'text/plain':
+                    charset = part.get_content_charset() or 'utf-8'
+                    body += part.get_payload(decode=True).decode(charset, errors='ignore')
+        else:
+            body = msg.get_payload(decode=True).decode(msg.get_content_charset() or 'utf-8', errors='ignore')
+        command = parse_command_from_reply(body)
+        if command:
+            update_frequency(command)
+            # Optionally, send confirmation email back
+    mail.logout()
+
+def should_send_email(frequency):
+    today = datetime.utcnow().date()
+    if frequency == "DAILY":
+        return True
+    elif frequency == "WEEKLY":
+        return today.weekday() == 0  # Monday
+    elif frequency == "FORTNIGHTLY":
+        anchor = datetime(2024, 5, 6).date()  # Choose your anchor date
+        return ((today - anchor).days // 7) % 2 == 0 and today.weekday() == 0
+    return False
+
 # === Fetch Relevant News Articles ===
 def get_news_articles():
-    # Keywords to identify culturally relevant stories
     keywords = [
         "mixed heritage", "mixed race", "biracial", "dual heritage",
         "multiethnic", "racial identity", "cultural identity", "interracial family",
@@ -25,8 +91,6 @@ def get_news_articles():
         "Afro-European", "racial justice", "intersectionality",
         "heritage month", "identity politics", "intercultural"
     ]
-
-    # News domains to restrict search to reputable outlets
     domains = [
         # UK
         "bbc.co.uk", "theguardian.com", "independent.co.uk", "thetimes.co.uk",
@@ -42,39 +106,29 @@ def get_news_articles():
         "euronews.com", "dw.com", "lemonde.fr", "spiegel.de", "elpais.com",
         "politico.eu", "ilpost.it", "la Repubblica", "derstandard.at", "nos.nl"
     ]
-
-    # Only fetch stories from the last 24 hours
     from_param = (datetime.utcnow() - timedelta(days=1)).strftime('%Y-%m-%dT%H:%M:%SZ')
-
-    # Query NewsAPI
     articles = newsapi.get_everything(
-        q=' OR '.join(keywords),              # Combine keywords using OR
-        domains=','.join(domains),            # Restrict to trusted sources
+        q=' OR '.join(keywords),
+        domains=','.join(domains),
         language='en',
         sort_by='publishedAt',
         page_size=40,
-        from_param=from_param                 # Only articles published in last 24 hours
+        from_param=from_param
     )
-
-    # Deduplicate by stripping URL parameters
     seen_urls = set()
     clean_articles = []
-
     for article in articles.get('articles', []):
-        url = article['url'].split('?')[0]  # Strip tracking params like ?utm=...
+        url = article['url'].split('?')[0]
         if url not in seen_urls:
             seen_urls.add(url)
             clean_articles.append(article)
-
     return clean_articles
 
 # === Summarise News Relevance ===
 def summarise_article(title, content):
     prompt = f"""You are helping The Mixed Museum track public conversations about mixed heritage.
-
 Given the following article, is it relevant to themes of mixed heritage, racial identity, or representation?
 If yes, summarise in 2 sentences. If not, say 'Not relevant.'
-
 Title: {title}
 Content: {content}
 """
@@ -100,14 +154,12 @@ def build_news_section():
 # === GA4 via BigQuery with Comparison ===
 def get_ga4_data(period='recent'):
     client = bigquery.Client.from_service_account_json(os.getenv("GOOGLE_APPLICATION_CREDENTIALS"))
-
     if period == 'recent':
         start_offset = 3
         end_offset = 0
     else:
         start_offset = 6
         end_offset = 3
-
     query = f"""
     WITH sessions AS (
       SELECT
@@ -123,7 +175,6 @@ def get_ga4_data(period='recent'):
         _TABLE_SUFFIX BETWEEN FORMAT_DATE('%Y%m%d', DATE_SUB(CURRENT_DATE(), INTERVAL {start_offset} DAY))
         AND FORMAT_DATE('%Y%m%d', DATE_SUB(CURRENT_DATE(), INTERVAL {end_offset} DAY))
     ),
-
     pageviews AS (
       SELECT
         event_params.value.string_value AS page_title,
@@ -132,7 +183,6 @@ def get_ga4_data(period='recent'):
       WHERE event_name = 'page_view'
       GROUP BY page_title
     ),
-
     sessions_by_country AS (
       SELECT
         country,
@@ -141,7 +191,6 @@ def get_ga4_data(period='recent'):
       WHERE event_name = 'session_start'
       GROUP BY country
     ),
-
     source_summary AS (
       SELECT
         source,
@@ -151,57 +200,44 @@ def get_ga4_data(period='recent'):
       WHERE event_name = 'session_start'
       GROUP BY source, medium
     )
-
     SELECT
       'pageviews' AS metric,
       page_title AS label,
       views AS value
     FROM pageviews
-
     UNION ALL
-
     SELECT
       'countries' AS metric,
       country AS label,
       sessions AS value
     FROM sessions_by_country
-
     UNION ALL
-
     SELECT
       'sources' AS metric,
       CONCAT(source, ' / ', medium) AS label,
       sessions AS value
     FROM source_summary
-
     ORDER BY metric, value DESC
     """
-
     return client.query(query).to_dataframe()
 
 # === GA4 Comparison Summary ===
 def summarise_ga4_with_comparison():
     df_now = get_ga4_data(period='recent')
     df_prev = get_ga4_data(period='previous')
-
     summary_parts = []
-
     for metric in ['pageviews', 'countries', 'sources']:
         now = df_now[df_now['metric'] == metric].set_index('label')
         prev = df_prev[df_prev['metric'] == metric].set_index('label')
         combined = now.join(prev, lsuffix='_now', rsuffix='_prev', how='outer').fillna(0)
         combined['change'] = ((combined['value_now'] - combined['value_prev']) / combined['value_prev'].replace(0, 1)) * 100
         combined = combined.sort_values(by='value_now', ascending=False).head(5)
-
         table = combined[['value_now', 'value_prev', 'change']].round(1).to_string()
         summary_parts.append(f"\nTop {metric} (current vs. previous 3 days):\n{table}")
-
     prompt = f"""The Mixed Museum's GA4 report shows these comparisons between the last 3 days and the 3 days prior:
 {chr(10).join(summary_parts)}
-
 Please summarise any spikes, trends, or surprising drops across content, countries, or sources. Keep it under 5 sentences.
 """
-
     response = openai.ChatCompletion.create(
         model="gpt-3.5-turbo",
         messages=[{"role": "user", "content": prompt}],
@@ -224,12 +260,10 @@ def send_daily_email(subject, news_html, ga4_html):
     password = os.getenv("EMAIL_PASSWORD")
     smtp_server = os.getenv("SMTP_SERVER")
     smtp_port = int(os.getenv("SMTP_PORT"))
-
     msg = MIMEMultipart("alternative")
     msg['From'] = sender
     msg['To'] = recipient
     msg['Subject'] = subject
-
     html_body = f"""
     <html>
     <head>
@@ -258,29 +292,31 @@ def send_daily_email(subject, news_html, ga4_html):
     </head>
     <body>
       <p>Hello Chamion,</p>
-      <p>Here is your daily insight report for The Mixed Museum:</p>
-
+      <p>Here is your insight report for The Mixed Museum:</p>
       <h2>🗞 Relevant News Opportunities</h2>
       {news_html}
-
       <h2>📊 Website Trends from GA4</h2>
       {ga4_html}
-
+      <br>
+      <b>To change the frequency of these emails, simply reply to this email with the first line as one of: Daily, Weekly, Fortnightly.</b>
       <p>—<br><i>This email was generated automatically by mixed-heritage-alert-bot.</i></p>
     </body>
     </html>
     """
-
     msg.attach(MIMEText(html_body, 'html'))
-
     with smtplib.SMTP(smtp_server, smtp_port) as server:
         server.starttls()
         server.login(sender, password)
         server.send_message(msg)
-        print("✅ Daily email sent successfully.")
+        print("✅ Email sent successfully.")
 
 # === Main Execution ===
 if __name__ == "__main__":
-    news = build_news_section()
-    ga4 = build_ga4_section()
-    send_daily_email("📬 The Mixed Museum: Daily Media & Analytics Brief", news, ga4)
+    check_email_for_command()
+    freq = get_current_frequency()
+    if should_send_email(freq):
+        news = build_news_section()
+        ga4 = build_ga4_section()
+        send_daily_email("The Mixed Museum: Media & Analytics Brief", news, ga4)
+    else:
+        print(f"Not time to send report ({freq}).")
