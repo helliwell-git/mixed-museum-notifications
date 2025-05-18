@@ -1,61 +1,79 @@
 import os
-from dotenv import load_dotenv
-import openai
-from newsapi import NewsApiClient
-from google.cloud import bigquery
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-from email.mime.image import MIMEImage
-from datetime import datetime, timedelta
-import imaplib
-import email
-import matplotlib.pyplot as plt
-import io
+from dotenv import load_dotenv  # For loading environment variables from .env
+import openai                  # For AI-powered summaries
+from newsapi import NewsApiClient  # To fetch news articles
+from google.cloud import bigquery  # To access Google Analytics data via BigQuery
+import smtplib                 # For sending emails
+from email.mime.text import MIMEText  # For formatting email content
+from email.mime.multipart import MIMEMultipart  # For multipart emails (with HTML, images)
+from email.mime.image import MIMEImage  # For sending images as attachments
+from datetime import datetime, timedelta  # For date/time operations
+import imaplib                 # For checking email replies (IMAP)
+import email                   # For parsing email messages
+import matplotlib.pyplot as plt  # For creating charts/visualisations
+import io                      # For handling image buffers in memory
 
+# Load .env file containing API keys and credentials
 load_dotenv()
 
 # === API KEYS ===
-openai.api_key = os.getenv("OPENAI_API_KEY")
-newsapi = NewsApiClient(api_key=os.getenv("NEWS_API_KEY"))
+openai.api_key = os.getenv("OPENAI_API_KEY")  # Set OpenAI API key for summaries
+newsapi = NewsApiClient(api_key=os.getenv("NEWS_API_KEY"))  # NewsAPI client
 
+# File to store the user's chosen email frequency ("DAILY", "WEEKLY", "FORTNIGHTLY")
 FREQUENCY_FILE = "frequency.txt"
-ALLOWED_SENDERS = ["chamion@themixedmuseum.org"]  # Add more allowed if needed
+ALLOWED_SENDERS = ["chamion@themixedmuseum.org"]  # Who is allowed to send frequency commands
 
-# === Frequency Control (unchanged) ===
+# === Frequency Control ===
+
 def get_current_frequency():
+    """
+    Reads the current report frequency from file. Defaults to DAILY if not set.
+    """
     if not os.path.exists(FREQUENCY_FILE):
         return "DAILY"
     with open(FREQUENCY_FILE, "r") as f:
         return f.read().strip().upper()
 
 def update_frequency(new_freq):
+    """
+    Updates the frequency.txt file with the new frequency setting.
+    """
     with open(FREQUENCY_FILE, "w") as f:
         f.write(new_freq.upper())
     print(f"Frequency updated to {new_freq}")
 
 def parse_command_from_reply(body):
+    """
+    Parses the email body for a frequency command (e.g., 'daily', 'weekly', 'fortnightly').
+    Only looks at first non-empty, non-quoted line.
+    """
     for line in body.splitlines():
         cleaned = line.strip().lower()
         if cleaned in ["daily", "weekly", "fortnightly"]:
             return cleaned.upper()
-        if cleaned and not cleaned.startswith('>'):
+        if cleaned and not cleaned.startswith('>'):  # Stop at first real line
             break
     return None
 
 def check_email_for_command():
+    """
+    Connects to Gmail via IMAP and checks for new emails from allowed senders.
+    If a frequency command is found, updates the frequency.
+    """
     if not os.getenv("EMAIL_FROM") or not os.getenv("EMAIL_PASSWORD"):
         return
     mail = imaplib.IMAP4_SSL("imap.gmail.com")
     mail.login(os.getenv("EMAIL_FROM"), os.getenv("EMAIL_PASSWORD"))
     mail.select("inbox")
-    status, messages = mail.search(None, '(UNSEEN)')
+    status, messages = mail.search(None, '(UNSEEN)')  # Only unread
     for num in messages[0].split():
         typ, msg_data = mail.fetch(num, '(RFC822)')
         msg = email.message_from_bytes(msg_data[0][1])
         sender = email.utils.parseaddr(msg['From'])[1]
         if sender.lower() not in [a.lower() for a in ALLOWED_SENDERS]:
-            continue
+            continue  # Ignore if not allowed
+        # Extract plain text from email
         body = ""
         if msg.is_multipart():
             for part in msg.walk():
@@ -70,18 +88,28 @@ def check_email_for_command():
     mail.logout()
 
 def should_send_email(frequency):
+    """
+    Determines whether the bot should send an email report today,
+    based on frequency (DAILY, WEEKLY, FORTNIGHTLY).
+    """
     today = datetime.utcnow().date()
     if frequency == "DAILY":
         return True
     elif frequency == "WEEKLY":
         return today.weekday() == 0  # Monday
     elif frequency == "FORTNIGHTLY":
-        anchor = datetime(2024, 5, 6).date()
+        anchor = datetime(2024, 5, 6).date()  # First 'Monday' to start the fortnight cycle
         return ((today - anchor).days // 7) % 2 == 0 and today.weekday() == 0
     return False
 
-# === Fetch Relevant News Articles (unchanged) ===
+# === News Article Fetching & Summarisation ===
+
 def get_news_articles():
+    """
+    Uses NewsAPI to fetch articles from major media sources,
+    filtering by keywords and deduplicating on URL.
+    Only fetches from the last 24 hours.
+    """
     keywords = [
         "mixed heritage", "mixed race", "biracial", "dual heritage",
         "multiethnic", "racial identity", "cultural identity", "interracial family",
@@ -118,8 +146,11 @@ def get_news_articles():
             clean_articles.append(article)
     return clean_articles
 
-# === Summarise News Relevance (unchanged) ===
 def summarise_article(title, content):
+    """
+    Sends each news article to OpenAI for a two-sentence summary
+    (or a "Not relevant" response if it's not about mixed heritage).
+    """
     prompt = f"""You are helping The Mixed Museum track public conversations about mixed heritage.
 Given the following article, is it relevant to themes of mixed heritage, racial identity, or representation?
 If yes, summarise in 2 sentences. If not, say 'Not relevant.'
@@ -134,6 +165,9 @@ Content: {content}
     return response.choices[0].message.content.strip()
 
 def build_news_section():
+    """
+    Assembles the news HTML section with only relevant (AI-approved) stories.
+    """
     section = ""
     for article in get_news_articles():
         title = article['title']
@@ -144,8 +178,16 @@ def build_news_section():
             section += f"<b>{title}</b><br>{summary}<br><a href='{url}'>{url}</a><br><br>"
     return section if section else "No relevant news articles today."
 
-# === GA4 via BigQuery with Comparison (unchanged) ===
+# === GA4 via BigQuery: Data, Summarisation, and Visualisation ===
+
 def get_ga4_data(period='recent'):
+    """
+    Queries Google BigQuery for GA4 analytics, pulling the last three days (or previous three) of:
+    - Top pageviews
+    - Top visitor countries
+    - Top traffic sources
+    Returns as a DataFrame for analysis and charting.
+    """
     client = bigquery.Client.from_service_account_json(os.getenv("GOOGLE_APPLICATION_CREDENTIALS"))
     if period == 'recent':
         start_offset = 3
@@ -215,6 +257,13 @@ def get_ga4_data(period='recent'):
     return client.query(query).to_dataframe()
 
 def summarise_ga4_with_comparison():
+    """
+    Compares GA4 metrics (current 3 days vs previous 3 days).
+    Produces:
+    - Table with top metrics and percent changes
+    - AI summary of trends
+    Also returns DataFrame for visualisation.
+    """
     df_now = get_ga4_data(period='recent')
     df_prev = get_ga4_data(period='previous')
     summary_parts = []
@@ -237,10 +286,13 @@ Please summarise any spikes, trends, or surprising drops across content, countri
     )
     return "\n\n".join(summary_parts), response.choices[0].message.content.strip(), df_now
 
-# === Visualisation Helpers ===
 def plot_bar_chart(df, metric, title, ylabel):
+    """
+    Generates a bar chart for the given metric (sources or countries).
+    Returns a BytesIO buffer of the image for embedding.
+    """
     import matplotlib
-    matplotlib.use('Agg')  # Ensure it works headless
+    matplotlib.use('Agg')  # Ensure works on servers with no GUI
     fig, ax = plt.subplots(figsize=(6, 3))
     data = df[df['metric'] == metric].sort_values('value', ascending=False).head(5)
     ax.bar(data['label'], data['value'], color='#4677C7')
@@ -255,9 +307,14 @@ def plot_bar_chart(df, metric, title, ylabel):
     return buf
 
 def build_ga4_section_with_charts():
+    """
+    Builds the HTML and in-memory images for GA4 section:
+    - Table of top metrics
+    - AI summary
+    - Two bar charts: top sources and top countries
+    """
     try:
         table, summary, df_now = summarise_ga4_with_comparison()
-        # Two charts: Top Sources, Top Countries
         chart_sources = plot_bar_chart(df_now, 'sources', 'Top Traffic Sources', 'Sessions')
         chart_countries = plot_bar_chart(df_now, 'countries', 'Top Countries', 'Sessions')
         html = f"<pre>{table}</pre><br><b>AI Summary:</b><br>{summary}"
@@ -265,8 +322,12 @@ def build_ga4_section_with_charts():
     except Exception as e:
         return f"⚠️ Error retrieving GA4 data: {e}", []
 
-# === Email Sending ===
+# === Email Sending (with inline charts) ===
+
 def send_daily_email(subject, news_html, ga4_html, images=[]):
+    """
+    Assembles and sends the full HTML report by email, with inline charts.
+    """
     sender = os.getenv("EMAIL_FROM")
     recipient = os.getenv("EMAIL_TO")
     password = os.getenv("EMAIL_PASSWORD")
@@ -277,7 +338,7 @@ def send_daily_email(subject, news_html, ga4_html, images=[]):
     msg['To'] = recipient
     msg['Subject'] = subject
 
-    # Embed images inline in the HTML
+    # Embed image(s) in the HTML email
     img_html = ""
     for i, (name, img_buf) in enumerate(images):
         img_html += f'<img src="cid:img{i}" style="max-width:90%; margin-bottom:15px;"><br>'
@@ -326,7 +387,7 @@ def send_daily_email(subject, news_html, ga4_html, images=[]):
     msg_alt.attach(MIMEText(html_body, 'html'))
     msg.attach(msg_alt)
 
-    # Attach images
+    # Attach image buffers inline for each chart (referenced by CID above)
     for i, (name, img_buf) in enumerate(images):
         img = MIMEImage(img_buf.read(), name=name)
         img.add_header('Content-ID', f'<img{i}>')
@@ -334,15 +395,17 @@ def send_daily_email(subject, news_html, ga4_html, images=[]):
         msg.attach(img)
         img_buf.seek(0)
 
+    # Send the email using SMTP (Gmail or other)
     with smtplib.SMTP(smtp_server, smtp_port) as server:
         server.starttls()
         server.login(sender, password)
         server.send_message(msg)
         print("✅ Email sent successfully with visualisations.")
 
-# === Main Execution ===
+# === Main Execution: Orchestrates All Functions ===
+
 if __name__ == "__main__":
-    check_email_for_command()
+    check_email_for_command()  # See if there's a reply command to change frequency
     freq = get_current_frequency()
     if should_send_email(freq):
         news = build_news_section()
